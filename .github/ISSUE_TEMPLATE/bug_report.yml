@@ -1,0 +1,30 @@
+name: Bug report
+description: Report a reproducible local workflow problem.
+body:
+  - type: markdown
+    attributes:
+      value: Use fictional examples and redact private data. Report suspected vulnerabilities through SECURITY.md.
+  - type: input
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Harness version/commit, OS, Node version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Exact commands and minimal fictional files.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Redacted output

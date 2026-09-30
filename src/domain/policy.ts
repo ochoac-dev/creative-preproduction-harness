@@ -16,6 +16,10 @@ export type CreativeProvider = "local-html-svg" | "figma" | "manual";
 const DEFAULT_LOCAL_PROVIDER: CreativeProvider = "local-html-svg";
 
 export type ManifestPolicyIssueCode =
+  | "asset-reference-missing"
+  | "artifact-reference-missing"
+  | "feedback-reference-missing"
+  | "handoff-artifact-unapproved"
   | "asset-private-reference"
   | "asset-rights-blocked"
   | "asset-provider-blocked"
@@ -247,6 +251,16 @@ function referencedAssetIssues(
   return issues;
 }
 
+/** Historical handoffs stored artifact IDs in assetIds; retain that narrow compatibility. */
+export function missingArtifactAssetIssues(manifest: ProjectManifest, artifact: ArtifactRecord): ManifestPolicyIssue[] {
+  return [...new Set(artifact.assetIds)].sort().flatMap((id) => {
+    if (manifest.assets.some((asset) => asset.id === id)
+      || (artifact.kind === "implementation-handoff" && manifest.artifacts.some((candidate) => candidate.id === id))) return [];
+    return [{ code: "asset-reference-missing" as const, subjectId: artifact.id,
+      message: `Artifact ${artifact.id} v${artifact.version} references missing asset ${id}.` }];
+  });
+}
+
 function handoffIntegrityIssues(
   manifest: ProjectManifest,
   handoff: ArtifactRecord,
@@ -263,22 +277,31 @@ function handoffIntegrityIssues(
     });
   }
   const referenceIds = [...new Set(handoff.assetIds)].sort();
-  const artifactReferenceIds = new Set(referenceIds);
+  const artifactReferenceIds = new Set<string>();
   for (const assetId of referenceIds) {
-    for (const artifactId of assetsById.get(assetId)?.relatedArtifactIds ?? []) {
+    const referencedAsset = assetsById.get(assetId);
+    if (referencedAsset === undefined && artifactsById.has(assetId)) artifactReferenceIds.add(assetId);
+    for (const artifactId of referencedAsset?.relatedArtifactIds ?? []) {
       artifactReferenceIds.add(artifactId);
     }
   }
   for (const referenceId of [...artifactReferenceIds].sort()) {
     const referencedArtifact = artifactsById.get(referenceId);
-    if (referencedArtifact !== undefined && (
+    if (referencedArtifact === undefined) {
+      // General relationship checks report absent relatedArtifactIds.
+      continue;
+    }
+    if (
       referencedArtifact.status === "provisional" || referencedArtifact.visibility === "private"
-    )) {
+    ) {
       issues.push({
         code: "provisional-in-handoff",
         subjectId: referencedArtifact.id,
         message: `Implementation handoff ${handoff.id} references provisional or private artifact ${referencedArtifact.id} v${referencedArtifact.version}.`
       });
+    } else if (referencedArtifact.status !== "approved") {
+      issues.push({ code: "handoff-artifact-unapproved", subjectId: referencedArtifact.id,
+        message: `Implementation handoff ${handoff.id} references artifact ${referencedArtifact.id} v${referencedArtifact.version} with status ${referencedArtifact.status}; an approved project-visible artifact is required.` });
     }
   }
   for (const referenceId of referenceIds) {
@@ -322,11 +345,31 @@ export function evaluateManifestPolicy(manifest: ProjectManifest): ManifestPolic
   }
 
   for (const artifact of latest) {
+    issues.push(...missingArtifactAssetIssues(manifest, artifact));
     for (const assetId of [...new Set(artifact.assetIds)].sort()) {
       const asset = assetsById.get(assetId);
       if (asset !== undefined) {
         issues.push(...referencedAssetIssues(artifact, asset));
       }
+    }
+  }
+
+  const artifactIds = new Set(manifest.artifacts.map((artifact) => artifact.id));
+  const feedbackIds = new Set(manifest.feedback.map((feedback) => feedback.id));
+  for (const asset of [...manifest.assets].sort(compareById)) {
+    for (const id of [...new Set(asset.relatedArtifactIds)].sort()) {
+      if (!artifactIds.has(id)) issues.push({ code: "artifact-reference-missing", subjectId: asset.id,
+        message: `Asset ${asset.id} references missing related artifact ${id}.` });
+    }
+    for (const id of [...new Set(asset.relatedFeedbackIds)].sort()) {
+      if (!feedbackIds.has(id)) issues.push({ code: "feedback-reference-missing", subjectId: asset.id,
+        message: `Asset ${asset.id} references missing related feedback ${id}.` });
+    }
+  }
+  for (const feedback of [...manifest.feedback].sort(compareById)) {
+    for (const id of [...new Set(feedback.resultingArtifactIds)].sort()) {
+      if (!artifactIds.has(id)) issues.push({ code: "artifact-reference-missing", subjectId: feedback.id,
+        message: `Feedback ${feedback.id} references missing resulting artifact ${id}.` });
     }
   }
 

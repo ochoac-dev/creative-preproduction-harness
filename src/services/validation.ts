@@ -1,14 +1,17 @@
-import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ProjectManifest } from "../domain/schema.js";
 import {
   normalizeProjectArtifactPath,
   requirePersistedPrivateArtifactPath
 } from "../domain/artifact-path.js";
-import { evaluateManifestPolicy } from "../domain/policy.js";
+import { evaluateManifestPolicy, missingArtifactAssetIssues, type ManifestPolicyIssueCode } from "../domain/policy.js";
 import { assertManagedAssetLocation } from "./assets.js";
+import { assertManifestProjectArtifactFile, assertPrivateArtifactFile, assertUnusedProjectArtifactFile } from "../storage/artifact-file.js";
 
 export type ExtensionDiagnosticCode =
+  | ManifestPolicyIssueCode
+  | "legacy-handoff-artifact-reference"
+  | "asset-file-missing"
   | "asset-private-reference"
   | "asset-rights-blocked"
   | "asset-provider-blocked"
@@ -46,14 +49,6 @@ function compareDiagnostics(left: Diagnostic, right: Diagnostic): number {
   return left.subjectId < right.subjectId ? -1 : 1;
 }
 
-async function isFile(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
-  }
-}
-
 function feedbackTargetExists(manifest: ProjectManifest, feedbackIndex: number): boolean {
   const target = manifest.feedback[feedbackIndex]?.target;
   if (target === undefined) {
@@ -78,8 +73,26 @@ export async function validateProject(
   const artifactIds = new Set<string>();
   const artifactVersions = new Set<string>();
   const duplicateVersions = new Set<string>();
+  // Diagnose malformed paths on their own records. They cannot be safely used
+  // as ownership candidates for another record's otherwise valid path.
+  const ownershipManifest = { ...manifest, artifacts: manifest.artifacts.filter((artifact) => {
+    try {
+      const normalized = artifact.visibility === "private"
+        ? requirePersistedPrivateArtifactPath(artifact.path) : normalizeProjectArtifactPath(artifact.path);
+      return normalized === artifact.path.replaceAll("\\", "/");
+    } catch { return false; }
+  }) };
 
   for (const artifact of manifest.artifacts) {
+    diagnostics.push(...missingArtifactAssetIssues(manifest, artifact).map((issue) => ({ ...issue, severity: "error" as const })));
+    if (artifact.kind === "implementation-handoff") {
+      for (const id of [...new Set(artifact.assetIds)].sort()) {
+        if (!manifest.assets.some((asset) => asset.id === id) && manifest.artifacts.some((candidate) => candidate.id === id)) {
+          diagnostics.push({ code: "legacy-handoff-artifact-reference", severity: "warning", subjectId: artifact.id,
+            message: `Implementation handoff ${artifact.id} v${artifact.version} stores artifact reference ${id} in assetIds; this legacy form is deprecated. Use an asset's relatedArtifactIds for future handoffs.` });
+        }
+      }
+    }
     artifactIds.add(artifact.id);
     const key = artifactVersionKey(artifact.id, artifact.version);
     if (artifactVersions.has(key) && !duplicateVersions.has(key)) {
@@ -111,7 +124,15 @@ export async function validateProject(
       continue;
     }
 
-    if (!await isFile(resolve(root, normalizedPath))) {
+    try {
+      if (artifact.visibility === "private") await assertPrivateArtifactFile(root, normalizedPath);
+      else await assertUnusedProjectArtifactFile(root, ownershipManifest, normalizedPath, artifact);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        diagnostics.push({ code: "tracked-path-unsafe", severity: "error", subjectId: artifact.id,
+          message: `Tracked artifact ${artifact.id} v${artifact.version} has an unsafe project path.` });
+        continue;
+      }
       diagnostics.push(artifact.visibility === "private"
         ? {
             code: "private-file-missing",
@@ -181,7 +202,13 @@ export async function validateProject(
         asset.storage.ref,
         "source"
       );
-      if (!await isFile(privateSource)) {
+      try { await assertPrivateArtifactFile(root, privateSource); }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          diagnostics.push({ code: "tracked-path-unsafe", severity: "error", subjectId: asset.id,
+            message: `Private source for asset ${asset.id} has an unsafe private path.` });
+          continue;
+        }
         diagnostics.push({
           code: "private-file-missing",
           severity: "warning",
@@ -197,7 +224,13 @@ export async function validateProject(
       if (normalizedPath !== asset.storage.path.replaceAll("\\", "/")) {
         throw new Error("Tracked asset path must be normalized");
       }
-    } catch {
+      await assertManifestProjectArtifactFile(root, manifest, normalizedPath);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        diagnostics.push({ code: "asset-file-missing", severity: "error", subjectId: asset.id,
+          message: `Managed asset file "${asset.storage.path}" does not exist.` });
+        continue;
+      }
       diagnostics.push({
         code: "tracked-path-unsafe",
         severity: "error",
@@ -216,5 +249,7 @@ export async function validateProject(
     });
   }
 
-  return diagnostics.sort(compareDiagnostics);
+  return [...new Map(diagnostics.map((diagnostic) => [
+    `${diagnostic.code}\0${diagnostic.severity}\0${diagnostic.subjectId}\0${diagnostic.message}`, diagnostic
+  ])).values()].sort(compareDiagnostics);
 }

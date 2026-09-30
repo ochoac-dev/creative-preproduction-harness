@@ -1,8 +1,8 @@
 import type { Command } from "commander";
-import { access } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promoteProvisionalArtifact } from "../services/provisional.js";
 import { ProjectStore } from "../storage/project-store.js";
+import { assertUnusedProjectArtifactFile } from "../storage/artifact-file.js";
 
 export function registerPromoteCommand(program: Command): void {
   program.command("promote")
@@ -25,7 +25,7 @@ export function registerPromoteCommand(program: Command): void {
         path: options.path,
         rationale: options.rationale
       });
-      await access(resolve(root, promoted.path));
+      await assertUnusedProjectArtifactFile(root, manifest, promoted.path);
       await store.save({ ...manifest, artifacts: [...manifest.artifacts, promoted] });
       process.stdout.write(`Promoted ${options.artifact} v${version} to v${promoted.version}.\n`);
     });

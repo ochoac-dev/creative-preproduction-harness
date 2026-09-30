@@ -6,6 +6,7 @@ import { normalizeProjectArtifactPath } from "../domain/artifact-path.js";
 import { describeUnknownRightsRestriction, effectiveArtifactDecision, evaluateManifestPolicy } from "../domain/policy.js";
 import type { ArtifactKind, ArtifactRecord, ProjectManifest } from "../domain/schema.js";
 import { renderAssetDossier } from "../services/asset-dossier.js";
+import { assertUnusedProjectArtifactFile } from "../storage/artifact-file.js";
 import type { CreativeDirectionContext } from "./types.js";
 
 type SharedContext = Omit<CreativeDirectionContext, "host">;
@@ -114,6 +115,7 @@ async function realpathIfPresent(path: string): Promise<string | undefined> {
 
 async function readApprovedArtifact(
   root: string,
+  manifest: ProjectManifest,
   artifact: ArtifactRecord,
   blockers: string[]
 ): Promise<string | undefined> {
@@ -157,10 +159,11 @@ async function readApprovedArtifact(
       );
       return undefined;
     }
+    await assertUnusedProjectArtifactFile(root, manifest, normalizedPath, artifact);
     return await readFile(canonicalPath, "utf8");
-  } catch {
+  } catch (error: unknown) {
     blockers.push(
-      `Approved ${artifact.kind} ${artifact.id} v${artifact.version} file is missing or unreadable.`
+      `Approved ${artifact.kind} ${artifact.id} v${artifact.version} file is unsafe, missing, or unreadable: ${(error as Error).message}`
     );
     return undefined;
   }
@@ -183,7 +186,7 @@ export async function buildSharedCreativeDirectionContext(input: {
     if (artifact === undefined) {
       continue;
     }
-    const contents = await readApprovedArtifact(root, artifact, blockers);
+    const contents = await readApprovedArtifact(root, manifest, artifact, blockers);
     if (contents !== undefined) {
       approvedContext.push(`${artifactLabel(artifact)}\n\n${contents}`);
     }

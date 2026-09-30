@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a concrete improvement to creative preproduction.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User and problem
+      description: Who needs this and what currently blocks their work?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed behavior and acceptance example
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Permissions, rights, and approval implications
+      description: Describe any new file writes, external providers, or human decisions.

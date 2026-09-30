@@ -1,6 +1,6 @@
 {
   "name": "creative-preproduction-harness",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,10 +10,12 @@
     "creative-preproduction": "dist/src/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "node dist/src/cli.js",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "commander": "15.0.0",
@@ -23,5 +25,23 @@
     "@types/node": "^24.0.0",
     "typescript": "7.0.2",
     "vitest": "5.0.1"
-  }
+  },
+  "description": "Local, agent-neutral creative preproduction records and explicit human review for website projects",
+  "license": "MIT",
+  "author": "Carlos Ochoa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ochoac-dev/creative-preproduction-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ochoac-dev/creative-preproduction-harness/issues"
+  },
+  "homepage": "https://github.com/ochoac-dev/creative-preproduction-harness#readme",
+  "keywords": [
+    "creative-direction",
+    "preproduction",
+    "website",
+    "cli",
+    "human-review"
+  ]
 }

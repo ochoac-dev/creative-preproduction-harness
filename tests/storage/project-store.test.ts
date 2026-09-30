@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ArtifactRecord, LegacyProjectManifest, ProjectManifest } from "../../src/domain/schema.js";
 import { recordApproval, reviseArtifact } from "../../src/services/artifacts.js";
 import { initializeProject } from "../../src/services/initializer.js";
+import { findHarnessPackage } from "../../src/services/package-info.js";
 import { ManifestMigrationRequiredError, ProjectStore } from "../../src/storage/project-store.js";
 
 const legacyManifest = {
@@ -322,7 +323,8 @@ describe("exclusive manifest writes", () => {
 
     expect(await firstWrite).toEqual({ succeeded: true });
     expect(JSON.parse(await readFile(join(workspace, "manifest.json"), "utf8"))).toEqual({
-      ...manifest, project: { ...manifest.project, name: "First writer" }
+      ...manifest, harnessVersion: first === "initialize" ? (await findHarnessPackage()).version : manifest.harnessVersion,
+      project: { ...manifest.project, name: "First writer" }
     });
     expect((await readdir(workspace)).filter((name) => name.endsWith(".tmp") || name.endsWith(".lock")))
       .toEqual([]);
