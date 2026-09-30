@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, lstat, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, lstat, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -9,7 +9,7 @@ import { withManifestLock } from "../../src/storage/manifest-write.js";
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
-  return { ...actual, lstat: vi.fn(actual.lstat), readFile: vi.fn(actual.readFile), rm: vi.fn(actual.rm) };
+  return { ...actual, lstat: vi.fn(actual.lstat), open: vi.fn(actual.open), readFile: vi.fn(actual.readFile), rm: vi.fn(actual.rm) };
 });
 const roots: string[] = [];
 async function paths() {
@@ -25,6 +25,21 @@ function deferred() {
   let resolve!: () => void;
   return { promise: new Promise<void>((done) => { resolve = done; }), resolve: () => resolve() };
 }
+
+async function differentDescriptorDeviceIds(): Promise<void> {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(open).mockImplementation(async (...arguments_: Parameters<typeof open>) => {
+    const file = await actual.open(...arguments_);
+    const originalStat = file.stat.bind(file);
+    vi.spyOn(file, "stat").mockImplementation(async () => {
+      const status = await originalStat();
+      // Model Node 22.12 Windows path-vs-handle volume serial differences.
+      status.dev += 4294967296;
+      return status;
+    });
+    return file;
+  });
+}
 afterEach(async () => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
@@ -32,6 +47,103 @@ afterEach(async () => {
 });
 
 describe("manifest lock coordination", () => {
+  it("releases its own lock when handle and path device IDs differ", async () => {
+    const path = await paths();
+    await differentDescriptorDeviceIds();
+    expect(await withManifestLock(path.manifest, async () => "first")).toBe("first");
+    expect(await readdir(path.workspace)).toEqual([]);
+    expect(await withManifestLock(path.manifest, async () => "second")).toBe("second");
+    expect(await readdir(path.workspace)).toEqual([]);
+  });
+
+  it("inspects and recovers a dead lock when handle and path device IDs differ", async () => {
+    const path = await paths();
+    await writeFile(`${path.manifest}.lock`, deadOwner());
+    await differentDescriptorDeviceIds();
+    expect((await inspectManifestLock(path.manifest)).state).toBe("dead");
+    expect(await recoverManifestLock(path.manifest)).toBe(true);
+    expect(await readdir(path.workspace)).toEqual([]);
+  });
+
+  it("cleans a partial owner write without masking its failure when device APIs differ", async () => {
+    const path = await paths();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const failure = new Error("Partial owner metadata write failed");
+    await differentDescriptorDeviceIds();
+    const openWithDifferentDevice = vi.mocked(open).getMockImplementation()!;
+    vi.mocked(open).mockImplementation(async (...arguments_: Parameters<typeof open>) => {
+      const file = await openWithDifferentDevice(...arguments_);
+      if (String(arguments_[0]) === `${path.manifest}.lock` && String(arguments_[1]).startsWith("wx")) {
+        const originalWrite = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async (contents) => {
+          await originalWrite(String(contents).slice(0, 12), "utf8");
+          throw failure;
+        });
+      }
+      return file;
+    });
+    await expect(withManifestLock(path.manifest, async () => true)).rejects.toBe(failure);
+    expect(await actual.readdir(path.workspace)).toEqual([]);
+  });
+
+  it("refuses a replacement lock installed while writing owner metadata", async () => {
+    const path = await paths();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const replacement = JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(),
+      token: "replacement-writer", startedAt: "2026-09-30T18:00:00.000Z" });
+    vi.mocked(open).mockImplementation(async (...arguments_: Parameters<typeof open>) => {
+      const file = await actual.open(...arguments_);
+      if (String(arguments_[0]) === `${path.manifest}.lock` && String(arguments_[1]).startsWith("wx")) {
+        const originalWrite = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async (contents, options) => {
+          await originalWrite(contents, options);
+          await rename(`${path.manifest}.lock`, `${path.manifest}.original-lock`);
+          await writeFile(`${path.manifest}.lock`, replacement, { flag: "wx" });
+        });
+      }
+      return file;
+    });
+    let entered = false;
+    const result = await withManifestLock(path.manifest, async () => { entered = true; })
+      .then(() => undefined, (error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect(entered).toBe(false);
+    expect(await readFile(`${path.manifest}.lock`, "utf8")).toBe(replacement);
+  });
+
+  it("preserves a replacement with identical copied owner bytes during cleanup", async () => {
+    const path = await paths();
+    let contents = "";
+    await withManifestLock(path.manifest, async () => {
+      contents = await readFile(`${path.manifest}.lock`, "utf8");
+      await rename(`${path.manifest}.lock`, `${path.manifest}.original-lock`);
+      await writeFile(`${path.manifest}.lock`, contents, { flag: "wx" });
+    });
+    expect(await readFile(`${path.manifest}.lock`, "utf8")).toBe(contents);
+  });
+
+  it("preserves a replacement after a partial owner write and rethrows the original failure", async () => {
+    const path = await paths();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const failure = new Error("Partial owner write failed before replacement");
+    const partial = '{"version":1';
+    vi.mocked(open).mockImplementation(async (...arguments_: Parameters<typeof open>) => {
+      const file = await actual.open(...arguments_);
+      if (String(arguments_[0]) === `${path.manifest}.lock` && String(arguments_[1]).startsWith("wx")) {
+        const originalWrite = file.writeFile.bind(file);
+        vi.spyOn(file, "writeFile").mockImplementation(async () => {
+          await originalWrite(partial, "utf8");
+          await rename(`${path.manifest}.lock`, `${path.manifest}.original-lock`);
+          await writeFile(`${path.manifest}.lock`, partial, { flag: "wx" });
+          throw failure;
+        });
+      }
+      return file;
+    });
+    await expect(withManifestLock(path.manifest, async () => true)).rejects.toBe(failure);
+    expect(await readFile(`${path.manifest}.lock`, "utf8")).toBe(partial);
+  });
+
   it("cleans its acquired lock if the recovery-marker recheck fails", async () => {
     const path = await paths();
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");

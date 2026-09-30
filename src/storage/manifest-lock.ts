@@ -17,6 +17,10 @@ export interface ManifestLockInspection {
 }
 interface Snapshot { dev: number; ino: number; contents: string; }
 
+function samePathIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function code(error: unknown): string | undefined { return (error as NodeJS.ErrnoException).code; }
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true; }
@@ -24,21 +28,21 @@ async function exists(path: string): Promise<boolean> {
 }
 
 async function snapshot(path: string): Promise<Snapshot | undefined> {
-  let file: FileHandle;
+  let file: FileHandle | undefined;
   try {
-    const location = await lstat(path);
-    if (!location.isFile() || location.isSymbolicLink()) throw new Error("Lock has uncertain non-regular metadata.");
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error("Lock has uncertain non-regular metadata.");
     file = await open(path, "r");
-    const identity = await file.stat();
-    if (identity.dev !== location.dev || identity.ino !== location.ino) {
-      await file.close();
+    const contents = await file.readFile("utf8");
+    const after = await lstat(path);
+    // Use one stat API for device identity: older Windows libuv versions can
+    // report different volume serial widths through paths and file handles.
+    if (!after.isFile() || after.isSymbolicLink() || !samePathIdentity(before, after)) {
       throw new Error("Lock identity changed while inspecting; retry doctor.");
     }
+    return { dev: before.dev, ino: before.ino, contents };
   } catch (error: unknown) { if (code(error) === "ENOENT") return undefined; throw error; }
-  try {
-    const identity = await file.stat();
-    return { dev: identity.dev, ino: identity.ino, contents: await file.readFile("utf8") };
-  } finally { await file.close(); }
+  finally { if (file !== undefined) await file.close(); }
 }
 
 function inspectSnapshot(value: Snapshot | undefined): ManifestLockInspection {
@@ -77,27 +81,54 @@ export async function inspectManifestLock(manifestPath: string): Promise<Manifes
   catch (error: unknown) { return { state: "uncertain", message: error instanceof Error ? error.message : "Lock inspection failed." }; }
 }
 
-async function removeOwned(path: string, identity: { dev: number; ino: number }): Promise<void> {
-  let present;
-  try { present = await lstat(path); }
-  catch (error: unknown) { if (code(error) === "ENOENT") return; throw error; }
-  if (present.dev !== identity.dev || present.ino !== identity.ino || present.isSymbolicLink()) return;
+async function removeOwned(path: string, identity: Snapshot): Promise<void> {
+  const present = await snapshot(path);
+  if (present === undefined || !samePathIdentity(present, identity) || present.contents !== identity.contents) return;
   await rm(path);
 }
 
 async function createOwned(path: string): Promise<{ file: FileHandle; release: () => Promise<void> }> {
-  const file = await open(path, "wx");
-  const identity = await file.stat();
+  const owner: ManifestLockOwner = { version: 1, pid: process.pid, hostname: hostname(),
+    token: randomUUID(), startedAt: new Date().toISOString() };
+  const expectedContents = `${JSON.stringify(owner)}\n`;
+  const file = await open(path, "wx+");
+  let identity: { dev: number; ino: number } | undefined;
+  let ownedContents: string | undefined;
   const release = async () => {
+    // A failed metadata write can leave only a prefix. Compare the bytes on
+    // the original descriptor, not an assumed complete token or a late path.
+    if (identity !== undefined && ownedContents === undefined) {
+      try {
+        const buffer = Buffer.alloc(Buffer.byteLength(expectedContents));
+        let offset = 0;
+        while (offset < buffer.length) {
+          const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
+          if (bytesRead === 0) break;
+          offset += bytesRead;
+        }
+        ownedContents = buffer.subarray(0, offset).toString("utf8");
+      } catch { /* Unreadable ownership is retained rather than deleting another writer. */ }
+    }
     await Promise.allSettled([file.close()]);
-    const [removed] = await Promise.allSettled([removeOwned(path, identity)]);
-    if (removed?.status === "rejected") await Promise.allSettled([removeOwned(path, identity)]);
+    if (identity === undefined || ownedContents === undefined) return;
+    const owned = { ...identity, contents: ownedContents };
+    const [removed] = await Promise.allSettled([removeOwned(path, owned)]);
+    if (removed?.status === "rejected") await Promise.allSettled([removeOwned(path, owned)]);
   };
   try {
-    const owner: ManifestLockOwner = { version: 1, pid: process.pid, hostname: hostname(),
-      token: randomUUID(), startedAt: new Date().toISOString() };
-    await file.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+    const descriptor = await file.stat();
+    const location = await lstat(path);
+    if (!location.isFile() || location.isSymbolicLink() || location.ino !== descriptor.ino) {
+      throw new Error("Lock identity changed during creation; refusing a replacement writer.");
+    }
+    identity = { dev: location.dev, ino: location.ino };
+    await file.writeFile(expectedContents, "utf8");
     await file.sync();
+    const present = await snapshot(path);
+    if (present === undefined || !samePathIdentity(present, identity) || present.contents !== expectedContents) {
+      throw new Error("Lock ownership changed during creation; refusing a replacement writer.");
+    }
+    ownedContents = expectedContents;
     return { file, release };
   } catch (error: unknown) { await release(); throw error; }
 }
