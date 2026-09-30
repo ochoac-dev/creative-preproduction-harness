@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-labelledby="title desc">
+  <title id="title">Harbor Lantern workshop emblem</title>
+  <desc id="desc">An original amber lantern above two blue waves on a warm paper background.</desc>
+  <rect width="800" height="500" fill="#f6f2e8"/>
+  <path d="M350 110h100l35 40v180H315V150Z" fill="#d3902c" stroke="#243c49" stroke-width="12"/>
+  <path d="M350 110V85h100v25M320 180h160M320 290h160M400 180v110" fill="none" stroke="#243c49" stroke-width="12"/>
+  <path d="M240 385q80-40 160 0t160 0M280 425q60-30 120 0t120 0" fill="none" stroke="#243c49" stroke-width="14" stroke-linecap="round"/>
+</svg>

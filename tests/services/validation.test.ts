@@ -416,6 +416,12 @@ describe("validateProject", () => {
         message: "Feedback missing-target does not identify a target."
       },
       {
+        code: "legacy-handoff-artifact-reference",
+        severity: "warning",
+        subjectId: "handoff",
+        message: "Implementation handoff handoff v1 stores artifact reference private-study in assetIds; this legacy form is deprecated. Use an asset's relatedArtifactIds for future handoffs."
+      },
+      {
         code: "private-file-missing",
         severity: "warning",
         subjectId: "private-portrait",

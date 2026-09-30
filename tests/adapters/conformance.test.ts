@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -137,6 +137,27 @@ async function runCli(...arguments_: string[]): Promise<string> {
 }
 
 describe("agent adapter conformance", () => {
+  it.each(["private asset", "private study", "other approved artifact"] as const)(
+    "withholds approved context replaced by a hard link to a %s in both hosts", async (owner) => {
+      const root = await fixtureRoot();
+      const project = manifest();
+      const source = owner === "private asset" ? ".creative-preproduction/private/assets/campaign-portrait/source"
+        : owner === "private study" ? project.artifacts[4]!.path : project.artifacts[0]!.path;
+      await mkdir(join(root, source, ".."), { recursive: true });
+      const marker = "Private or unrelated approved bytes must not become identity context.";
+      await writeFile(join(root, source), marker);
+      await rm(join(root, "direction/identity-thesis-v2.md"));
+      await link(join(root, source), join(root, "direction/identity-thesis-v2.md"));
+      const before = structuredClone(project);
+      for (const adapter of [codexAdapter, claudeAdapter]) {
+        const context = await adapter.build({ root, manifest: project });
+        expect(context.approvedContext.join("\n")).not.toContain(marker);
+        expect(context.blockers.join("\n")).toMatch(/identity-thesis.*(unsafe|hard link|separate copy|already used)/i);
+      }
+      expect(project).toEqual(before);
+    }
+  );
+
   it.each(["returned", "approved-with-conditions"] as const)(
     "withholds %s exact-version guidance in both hosts without rewriting history", async (decision) => {
       const root = await fixtureRoot();

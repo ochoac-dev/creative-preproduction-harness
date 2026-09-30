@@ -4,6 +4,7 @@ import type { AssetStorage } from "../domain/schema.js";
 import { addAsset, assertManagedAssetLocation, createAsset, updateAsset } from "../services/assets.js";
 import { PrivateWorkspace } from "../storage/private-workspace.js";
 import { ProjectStore } from "../storage/project-store.js";
+import { assertManifestProjectArtifactFile } from "../storage/artifact-file.js";
 
 function collect(value: string, values: string[] = []): string[] {
   return [...values, value];
@@ -55,7 +56,10 @@ export function registerAssetCommands(program: Command): void {
       const workspace = options.rights === "unknown" ? new PrivateWorkspace(root) : undefined;
       let imported = false;
       await store.mutateAssets(async (manifest) => {
-        if (created.storage.kind === "managed") await assertManagedAssetLocation(root, created.storage.path);
+        if (created.storage.kind === "managed") {
+          await assertManagedAssetLocation(root, created.storage.path);
+          await assertManifestProjectArtifactFile(root, manifest, created.storage.path);
+        }
         const updated = addAsset(manifest, created);
         if (workspace) {
           if (manifest.assets.some((asset) => asset.storage.kind === "private" && asset.storage.ref === options.id)) {
@@ -95,7 +99,11 @@ export function registerAssetCommands(program: Command): void {
           ...(options.path === undefined ? {} : { storage: { kind: "managed", path: options.path } })
         });
         const storage = updated.assets.find((candidate) => candidate.id === options.id)!.storage;
-        if (storage.kind === "managed") await assertManagedAssetLocation(root, storage.path);
+        if (storage.kind === "managed") {
+          await assertManagedAssetLocation(root, storage.path);
+          // Check the current manifest before a rights change replaces its private reference.
+          await assertManifestProjectArtifactFile(root, manifest, storage.path);
+        }
         return updated;
       });
       process.stdout.write(`Updated asset ${options.id}.\n`);

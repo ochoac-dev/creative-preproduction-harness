@@ -49,6 +49,11 @@ async function projectRoot(): Promise<string> {
     kind: "new-site",
     now: new Date("2026-09-17T18:00:00.000Z")
   });
+  // Managed registration requires supplied bytes; these tests exercise later policy/publication failures.
+  await mkdir(join(root, "public"));
+  for (const path of ["portrait.jpg", "public/portrait.jpg", "public/campaign-portrait.jpg"]) {
+    await writeFile(join(root, path), Buffer.from([0xff, 0xd8, 0xff]));
+  }
   return root;
 }
 

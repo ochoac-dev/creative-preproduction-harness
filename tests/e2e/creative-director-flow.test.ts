@@ -12,6 +12,7 @@ import { createArtifact, recordApproval } from "../../src/services/artifacts.js"
 import { updateAsset } from "../../src/services/assets.js";
 import { validateProject } from "../../src/services/validation.js";
 import { ProjectStore } from "../../src/storage/project-store.js";
+import { findHarnessPackage } from "../../src/services/package-info.js";
 
 const roots: string[] = [];
 
@@ -80,7 +81,7 @@ describe("creative-director collaboration flow", () => {
       "init", "--root", root, "--id", "river-voices", "--name", "River Voices", "--kind", "new-site"
     )).resolves.toBe("Initialized River Voices at stage brief\n");
     const store = new ProjectStore(root);
-    expect((await store.load()).harnessVersion).toBe("0.2.0");
+    expect((await store.load()).harnessVersion).toBe((await findHarnessPackage()).version);
 
     await runCli("participant", "add", "--root", root, "--id", "mina-shah", "--name", "Mina Shah", "--role", "creative-lead");
     await runCli("participant", "own", "--root", root, "--area", "creative-direction", "--participant", "mina-shah");
